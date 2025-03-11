@@ -16,9 +16,9 @@ LICHESS_USERNAME = "LeelaQueenOdds"
 LICHESS_TOKEN = os.environ.get("LICHESS_TOKEN")  # Must be set in your environment
 LEADERBOARD_FILE = "leaderboard.json"
 ARCHIVE_FILE = "game_archive.json"
-UPDATE_INTERVAL = 600  # 30 minutes (in seconds)
+UPDATE_INTERVAL = 600  # 10 minutes, in seconds
 
-# Set the cutoff date to February 24, 2025.
+# Set the cutoff date for rating calculations.
 RATING_START_TIMESTAMP = int(datetime(2025, 2, 24).timestamp() * 1000)
 
 # Partition chunk size for full update: 30 minutes in milliseconds.
@@ -29,12 +29,9 @@ app = Flask(__name__)
 # =============================================================================
 # GLOBAL STATE & LOCKS
 # =============================================================================
-# 'leaderboard' holds computed ratings and metadata.
-# 'archive' holds raw game data.
 leaderboard = None
 archive = None
 
-# In-process lock for shared memory.
 leaderboard_lock = threading.Lock()
 
 # =============================================================================
@@ -60,7 +57,7 @@ def load_leaderboard():
     if os.path.exists(LEADERBOARD_FILE):
         with open(LEADERBOARD_FILE, "r") as f:
             return json.load(f)
-    # If no data exists, initialize metadata.
+    # Initialize with basic metadata.
     return {"metadata": {"last_fetch": 0, "prevlinks": [], "next_update": int(time.time()) + UPDATE_INTERVAL}}
 
 def save_leaderboard(lb):
@@ -82,65 +79,96 @@ leaderboard = load_leaderboard()
 archive = load_archive()
 
 # =============================================================================
-# ELO CALCULATION FUNCTIONS
+# STATISTICAL MODEL FUNCTIONS
 # =============================================================================
-def logistic(x):
-    return 1 / (1 + math.exp(-x))
-
-def pentanomial_expected_score(rating_diff):
-    D = 173.7
-    x = rating_diff / D
-    a, b, c, d = -0.8, -0.2, 0.2, 0.8
-    p_loss     = logistic(a - x)
-    p_nearloss = logistic(b - x) - logistic(a - x)
-    p_draw     = logistic(c - x) - logistic(b - x)
-    p_nearwin  = logistic(d - x) - logistic(c - x)
-    p_win      = 1 - logistic(d - x)
-    return 0 * p_loss + 0.25 * p_nearloss + 0.5 * p_draw + 0.75 * p_nearwin + 1 * p_win
-
-def k_factor(games_played):
-    if games_played <= 30:
-        return 40
-    elif games_played <= 150:
-        return 20
-    else:
-        return 10
-
-def update_rating(player_rating, opponent_rating, result, K):
-    expected = pentanomial_expected_score(player_rating - opponent_rating)
-    actual = {"win": 1, "draw": 0.5, "loss": 0}[result]
-    return player_rating + K * (actual - expected)
-
-# =============================================================================
-# TIME CONTROL – ADJUSTED BOT ELO & TIME CONTROL PARSING
-# =============================================================================
-def effective_bot_elo(bot_elo, tc):
+def escore(elo):
     """
-    Adjust the bot's effective rating given a time control string.
-    Expected format: "base+inc" (both in seconds). Total game time is approximated as base + 40×inc.
-    For very fast games (<60 sec) a bonus is applied.
+    Expected score function.
+    (Statistical model using a standard logistic-like formula.)
     """
-    if tc == "unknown":
-        return bot_elo
+    return 1 / (1 + 10 ** (elo / 400))
+
+def adjust1(timecontrol):
+    """
+    Adjustment model for time control (used for older games or lower thresholds).
+    Expected timecontrol format: "base+inc" where base and inc are in seconds.
+    """
     try:
-        base, inc = tc.split("+")
-        base = int(base)
-        inc = int(inc)
+        time_str, inc_str = timecontrol.split('+')
+        t = int(time_str)
+        inc = int(inc_str)
     except Exception:
-        return bot_elo
-    total_seconds = base + 40 * inc
-    if total_seconds < 60:
-        bonus = 200
-    elif total_seconds < 420:
-        bonus = 200 * (420 - total_seconds) / (420 - 60)
-    else:
-        bonus = 0
-    return bot_elo + int(round(bonus))
+        return 0
+    b1 = 150
+    b2 = 150
+    # Normalize relative to a 32-second time control reference.
+    normalized_32 = math.log(180 + math.log(1 + 2) * b1) * b2
+    return math.log(t + math.log(1 + inc) * b1) * b2 - normalized_32
 
+def model1(timecontrol):
+    """
+    Model1 adjustment function.
+    """
+    try:
+        time_str, inc_str = timecontrol.split('+')
+        t = int(time_str)
+        inc = int(inc_str)
+    except Exception:
+        return 0
+    b1 = 158
+    b2 = 251    
+    normalized_32 = math.log(180 + math.log(1 + 2) * b1) * b2
+    return math.log(t + math.log(1 + inc) * b1) * b2 - normalized_32
+
+def model2(timecontrol):
+    """
+    Alternate model2 adjustment function.
+    """
+    try:
+        time_str, inc_str = timecontrol.split('+')
+        t = int(time_str)
+        inc = int(inc_str)
+    except Exception:
+        return 0
+    b1 = 406
+    b2 = 390
+    ba = 45  # additional constant offset
+    normalized_32 = math.log(ba + 180 + math.log(2 + 2) * b1) * b2
+    return math.log(ba + t + math.log(2 + inc) * b1) * b2 - normalized_32
+
+# For recent games we choose model1 as our adjust2.
+adjust2 = model1
+
+def k_tresh(games_played):
+    """
+    Returns a K-factor based on the number of games played – higher for fewer games.
+    """
+    thresholds = [30, 150]
+    K_values = [40, 20, 10]
+    for i, t in enumerate(thresholds):
+        if games_played <= t:
+            return K_values[i]
+    return K_values[-1]
+
+def inactivity_malus(lead):
+    """
+    Apply an inactivity penalty of 10 rating points to all non-bot players.
+    Ensure that the rating does not fall below 1600.
+    """
+    for player in lead.keys():
+        if lead[player].get('BOT'):
+            continue
+        lead[player]['rating'] -= 10
+        if lead[player]['rating'] < 1600:
+            lead[player]['rating'] = 1600
+    return lead
+
+# =============================================================================
+# TIME CONTROL PARSING FUNCTIONS
+# =============================================================================
 def parse_time_control_parts(tc):
     """
-    Parse a time control string "base+inc" into its components.
-    Returns a tuple (base, inc, total_seconds) if parsed successfully; otherwise (None, None, None).
+    Parse a time control string "base+inc" into (base, inc, total_seconds).
     """
     if tc == "unknown":
         return (None, None, None)
@@ -155,9 +183,8 @@ def parse_time_control_parts(tc):
 
 def extract_tag_from_pgn(pgn, tag):
     """
-    Extracts the value for a PGN header tag.
-    For example, for tag="TimeControl", returns something like "600+15" if present.
-    If not found, returns "unknown".
+    Extract the value for a PGN header tag.
+    For example, returns the TimeControl from the PGN.
     """
     pattern = r'\[' + re.escape(tag) + r'\s+"([^"]+)"\]'
     match = re.search(pattern, pgn)
@@ -250,7 +277,7 @@ def update_leaderboard_func():
                 new_games = fetch_games(last_fetch)
             
             print(f"[INFO] Fetched {len(new_games)} new game(s) from Lichess.")
-            # Append new games to the archive, avoiding duplicates.
+            # Append new games to the archive avoiding duplicates.
             existing_ids = {game["id"] for game in archive["games"]}
             added_count = 0
             for game in new_games:
@@ -259,84 +286,132 @@ def update_leaderboard_func():
                     added_count += 1
             print(f"[INFO] Added {added_count} new game(s) to the archive.")
             save_archive(archive)
-
-            # Update last_fetch timestamp.
+            
+            # Update the last_fetch timestamp.
             if new_games:
                 max_ts = max(game["createdAt"] for game in new_games)
             else:
                 max_ts = last_fetch
             leaderboard["metadata"]["last_fetch"] = max_ts
 
+            # --- Begin Re-Calculation using the Statistical Model ---
+            # Define thresholds (in milliseconds) for bot baseline rating.
+            elo_tresh = [
+                datetime.strptime('2024.11.01', "%Y.%m.%d").timestamp()*1000,
+                datetime.strptime('2024.11.12', "%Y.%m.%d").timestamp()*1000
+            ]
             new_leaderboard = {}
+            # Consider only games after the rating start date.
             filtered_games = [g for g in archive["games"] if g["createdAt"] >= RATING_START_TIMESTAMP]
             filtered_games.sort(key=lambda g: g["createdAt"])
+
             for game in filtered_games:
                 ts = game["createdAt"]
-                # Determine the bot's baseline Elo.
-                if ts >= datetime(2024, 11, 12).timestamp() * 1000:
-                    bot_elo = 2450
-                else:
+                # Select bot baseline and adjustment function based on date.
+                if ts < elo_tresh[0]:
+                    bot_elo = 1950
+                    adjust = adjust1
+                elif ts < elo_tresh[1]:
                     bot_elo = 2100
+                    adjust = adjust1
+                else:
+                    bot_elo = 2450
+                    adjust = adjust2
 
-                # Extract TimeControl from the PGN.
+                # Extract TimeControl information either from the PGN or game header.
                 pgn = game.get("pgn", "")
                 tc = extract_tag_from_pgn(pgn, "TimeControl")
-                
-                effective_bot = effective_bot_elo(bot_elo, tc)
-                # Determine which side the bot played.
+                if tc == "unknown":
+                    tc = "180+2"  # Default/fallback; adjust as needed
+
+                # Adjust the bot’s baseline rating with the time control factor.
+                # Also adjust further if LeelaQueenOdds played as Black.
                 if game["players"]["black"]["user"]["name"].lower() == LICHESS_USERNAME.lower():
+                    # Bot played Black; human was White.
                     player_color = "white"
+                    bot_elo_adjusted = bot_elo - adjust(tc) - 100
                 else:
                     player_color = "black"
+                    bot_elo_adjusted = bot_elo - adjust(tc)
+
+                # Select the human player's information.
                 player_info = game["players"][player_color]
                 player = player_info["user"]["name"]
-                header_elo = player_info.get("rating", 1600)
+
+                try:
+                    header_rating = int(player_info.get("rating", 1600))
+                except Exception:
+                    header_rating = 1600
+
+                # Set the initial baseline for new players.
                 if player not in new_leaderboard:
+                    if header_rating >= 2000:
+                        starting_rating = 1800
+                    elif header_rating >= 1800:
+                        starting_rating = header_rating - 200
+                    else:
+                        starting_rating = 1600
                     new_leaderboard[player] = {
-                        "rating": max(1600, header_elo - 100),
+                        "rating": starting_rating,
                         "games": 0,
                         "last_game": "",
                         "tc_base_values": [],
                         "tc_inc_values": []
                     }
-                # Parse time control parts.
+
+                # Record time control values for later average calculation.
                 base, inc, total = parse_time_control_parts(tc)
                 if base is not None and inc is not None:
                     new_leaderboard[player]["tc_base_values"].append(base)
                     new_leaderboard[player]["tc_inc_values"].append(inc)
+
                 # Determine game result.
+                # For our model, define a mapping: win=1, draw=0.5, loss=0.
+                # If the human played White, invert the result.
                 if game["status"] == "draw":
-                    result = "draw"
+                    r = 0.5
                 elif game.get("winner") == player_color:
-                    result = "win"
+                    r = 1.0
                 else:
-                    result = "loss"
-                K = k_factor(new_leaderboard[player]["games"])
-                new_rating = update_rating(new_leaderboard[player]["rating"], effective_bot, result, K)
+                    r = 0.0
+
+                # Use our statistical model to update rating.
+                # The expected score is computed with:
+                #    escore( bot_effective - player_rating )
+                # and the rating is adjusted by a factor K.
+                K_factor = k_tresh(new_leaderboard[player]["games"])
+                if r == 0.5:
+                    K_factor = K_factor / 2  # Halve K for draws
+
+                # Our model subtracts the human’s rating from the bot’s effective rating.
+                rating_diff = bot_elo_adjusted - new_leaderboard[player]["rating"]
+                adjustment = (r - escore(rating_diff)) * K_factor
+                new_rating = new_leaderboard[player]["rating"] + adjustment
+
+                # Enforce a floor of 1600.
                 new_leaderboard[player]["rating"] = max(1600, new_rating)
                 new_leaderboard[player]["games"] += 1
                 game_date = datetime.utcfromtimestamp(ts / 1000).strftime("%Y.%m.%d")
                 new_leaderboard[player]["last_game"] = game_date
 
-            # Compute Average Time Control (in minutes+seconds).
+            # Compute Average Time Control (converting base seconds to minutes).
             for player in new_leaderboard:
                 base_vals = new_leaderboard[player].get("tc_base_values", [])
                 inc_vals = new_leaderboard[player].get("tc_inc_values", [])
                 if base_vals and inc_vals:
                     avg_base = sum(base_vals) / len(base_vals)
                     avg_inc = sum(inc_vals) / len(inc_vals)
-                    # Convert average base seconds to minutes.
                     avg_minutes = int(round(avg_base / 60))
                     avg_inc = int(round(avg_inc))
                     new_leaderboard[player]["average_time_control"] = f"{avg_minutes}+{avg_inc}"
                 else:
                     new_leaderboard[player]["average_time_control"] = "?"
-                # Clean up temporary lists.
+                # Remove temporary lists.
                 for field in ("tc_base_values", "tc_inc_values"):
                     if field in new_leaderboard[player]:
                         del new_leaderboard[player][field]
-            
-            # Sort players by rating (highest first) and update metadata.
+
+            # Sort the leaderboard by rating (highest first) and update metadata.
             sorted_lb = dict(sorted(new_leaderboard.items(), key=lambda item: item[1]["rating"], reverse=True))
             metadata = leaderboard["metadata"]
             metadata["next_update"] = int(time.time()) + UPDATE_INTERVAL
@@ -436,7 +511,6 @@ HTML_TEMPLATE = """
       th, td {
         padding: 0.4rem !important;
       }
-      /* Compact display for mobile */
       td:nth-child(1), th:nth-child(1) { min-width: 30px; } /* Rank */
       td:nth-child(2), th:nth-child(2) { min-width: 70px; } /* Player name */
       td:nth-child(3), th:nth-child(3) { min-width: 50px; } /* Rating */
@@ -480,11 +554,9 @@ HTML_TEMPLATE = """
   </div>
 </div>
 <script>
-  // Countdown timer: wait an extra 60 seconds on display, then auto-reload
   let nextUpdate = {{ next_update }};
   function updateTimer() {
     let now = Math.floor(Date.now() / 1000);
-    // Add an extra 60 seconds to give the server time to update
     let diff = (nextUpdate + 60) - now;
     if (diff <= 0) {
       window.location.reload();
@@ -504,7 +576,7 @@ HTML_TEMPLATE = """
 @app.route("/")
 def index():
     with leaderboard_lock:
-        # Build a sorted list of players (exclude metadata) for proper ranking.
+        # Create a sorted list of players (excluding metadata) for ranking.
         players = [(player, data) for player, data in leaderboard.items() if player != "metadata"]
         players.sort(key=lambda x: x[1]["rating"], reverse=True)
         next_update_val = leaderboard["metadata"].get("next_update", int(time.time()) + UPDATE_INTERVAL)
