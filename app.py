@@ -506,6 +506,14 @@ HTML_TEMPLATE = """
       border: 0;
       z-index: 10;
     }
+    a.lichess-link {
+      color: blue;
+      text-decoration: none;
+    }
+    a.lichess-link:hover {
+      color: blue;
+      text-decoration: none;
+    }
     @media (max-width: 768px) {
       body {
         padding: 8px;
@@ -557,7 +565,7 @@ HTML_TEMPLATE = """
       {% for player, data in players[:100] %}
         <tr class="{% if loop.index == 1 %}first-place{% elif loop.index == 2 %}second-place{% elif loop.index == 3 %}third-place{% endif %}">
           <td>{{ loop.index }}</td>
-          <td>{{ player }}</td>
+          <td><a href="https://lichess.org/@/{{ player }}" class="lichess-link" target="_blank">{{ player }}</a></td>
           <td>{{ data.rating | round | int }}</td>
           <td>{{ data.games }}</td>
           <td>{{ data.last_game }}</td>
@@ -570,17 +578,33 @@ HTML_TEMPLATE = """
 </div>
 <script>
   let nextUpdate = {{ next_update }};
+  // Retrieve the failedReloadCount from localStorage or initialize to 0
+  let failedReloadCount = parseInt(localStorage.getItem('failedReloadCount')) || 0;
+
   function updateTimer() {
     let now = Math.floor(Date.now() / 1000);
     let diff = (nextUpdate + 60) - now;
+
     if (diff <= 0) {
-      window.location.reload();
-      return;
+      // Only reload if failed reload count is less than 3
+      if (failedReloadCount < 3) {
+        failedReloadCount++;
+        localStorage.setItem('failedReloadCount', failedReloadCount);
+        window.location.reload();
+        return;
+      } else {
+        // Show an error message if we have failed to reload 3 times
+        document.getElementById("timer").innerText = "Failed to fetch update. Please reload manually.";
+      }
+    } else {
+      // Reset the failed reload count if the update is successful
+      localStorage.setItem('failedReloadCount', 0);
+      let minutes = Math.floor(diff / 60);
+      let seconds = diff % 60;
+      document.getElementById("timer").innerText = minutes + "m " + seconds + "s";
     }
-    let minutes = Math.floor(diff / 60);
-    let seconds = diff % 60;
-    document.getElementById("timer").innerText = minutes + "m " + seconds + "s";
   }
+
   setInterval(updateTimer, 1000);
   updateTimer();
 </script>
