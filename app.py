@@ -577,40 +577,62 @@ HTML_TEMPLATE = """
   </div>
 </div>
 <script>
+  // The following values come from the server.
   let nextUpdate = {{ next_update }};
-  // Retrieve the failedReloadCount from localStorage or initialize to 0
-  let failedReloadCount = parseInt(localStorage.getItem('failedReloadCount')) || 0;
+  let lastFetch = {{ last_fetch }};
+  
+  // Using sessionStorage instead of localStorage so that the counter resets for each session.
+  const storedNextUpdate = sessionStorage.getItem('prevNextUpdate');
+  let failedReloadCount = parseInt(sessionStorage.getItem('failedReloadCount') || "0", 10);
 
-  function updateTimer() {
-    let now = Math.floor(Date.now() / 1000);
-    let diff = (nextUpdate + 60) - now;
-
-    if (diff <= 0) {
-      // Only reload if failed reload count is less than 3
-      if (failedReloadCount < 3) {
-        failedReloadCount++;
-        localStorage.setItem('failedReloadCount', failedReloadCount);
-        window.location.reload();
-        return;
-      } else {
-        // Show an error message if we have failed to reload 3 times
-        document.getElementById("timer").innerText = "Failed to fetch update. Please reload manually.";
-      }
-    } else {
-      // Reset the failed reload count if the update is successful
-      localStorage.setItem('failedReloadCount', 0);
-      let minutes = Math.floor(diff / 60);
-      let seconds = diff % 60;
-      document.getElementById("timer").innerText = minutes + "m " + seconds + "s";
-    }
+  if (storedNextUpdate && parseInt(storedNextUpdate, 10) === nextUpdate) {
+      failedReloadCount++;
+  } else {
+      failedReloadCount = 0;
   }
+  sessionStorage.setItem('failedReloadCount', failedReloadCount);
+  sessionStorage.setItem('prevNextUpdate', nextUpdate);
 
-  setInterval(updateTimer, 1000);
-  updateTimer();
+  // If three or more consecutive reloads get the same nextUpdate value,
+  // we assume the page is stuck (e.g. because of caching issues).
+  if (failedReloadCount >= 3) {
+      document.addEventListener("DOMContentLoaded", function() {
+          let errorMessage = "Failed to fetch update.";
+          if (lastFetch > 0) {
+              errorMessage += " Last update: " + new Date(lastFetch).toLocaleString() + ".";
+          } else {
+              errorMessage += " No update has been recorded yet.";
+          }
+          errorMessage += " Please reload the page manually.";
+          document.getElementById("timer").innerText = errorMessage;
+      });
+  } else {
+      function updateTimer() {
+          let now = Math.floor(Date.now() / 1000);
+          // The countdown includes an extra 60 seconds to provide a buffer before reloading.
+          let diff = (nextUpdate + 60) - now;
+          if (diff <= 0) {
+              window.location.reload();
+              return;
+          }
+          let minutes = Math.floor(diff / 60);
+          let seconds = diff % 60;
+          document.getElementById("timer").innerText = minutes + "m " + seconds + "s";
+      }
+      setInterval(updateTimer, 1000);
+      updateTimer();
+  }
 </script>
 </body>
 </html>
 """
+
+@app.after_request
+def add_no_cache_headers(response):
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 @app.route("/")
 def index():
@@ -619,7 +641,8 @@ def index():
         players = [(player, data) for player, data in leaderboard.items() if player != "metadata"]
         players.sort(key=lambda x: x[1]["rating"], reverse=True)
         next_update_val = leaderboard["metadata"].get("next_update", int(time.time()) + UPDATE_INTERVAL)
-        return render_template_string(HTML_TEMPLATE, players=players, next_update=next_update_val)
+        last_fetch_val = leaderboard["metadata"].get("last_fetch", 0)
+        return render_template_string(HTML_TEMPLATE, players=players, next_update=next_update_val, last_fetch=last_fetch_val)
 
 @app.route("/api/leaderboard")
 def api_leaderboard_route():
