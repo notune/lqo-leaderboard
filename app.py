@@ -577,51 +577,42 @@ HTML_TEMPLATE = """
   </div>
 </div>
 <script>
-  // The following values come from the server.
   let nextUpdate = {{ next_update }};
   let lastFetch = {{ last_fetch }};
   
-  // Using sessionStorage instead of localStorage so that the counter resets for each session.
-  const storedNextUpdate = sessionStorage.getItem('prevNextUpdate');
-  let failedReloadCount = parseInt(sessionStorage.getItem('failedReloadCount') || "0", 10);
+  // Track consecutive failed updates
+  let failedUpdateCount = 0;
+  
+  function updateTimer() {
+    const now = Math.floor(Date.now() / 1000);
+    const diff = (nextUpdate + 60) - now;  // Add 60-second buffer
 
-  if (storedNextUpdate && parseInt(storedNextUpdate, 10) === nextUpdate) {
-      failedReloadCount++;
-  } else {
-      failedReloadCount = 0;
-  }
-  sessionStorage.setItem('failedReloadCount', failedReloadCount);
-  sessionStorage.setItem('prevNextUpdate', nextUpdate);
-
-  // If three or more consecutive reloads get the same nextUpdate value,
-  // we assume the page is stuck (e.g. because of caching issues).
-  if (failedReloadCount >= 3) {
-      document.addEventListener("DOMContentLoaded", function() {
-          let errorMessage = "Failed to fetch update.";
-          if (lastFetch > 0) {
-              errorMessage += " Last update: " + new Date(lastFetch).toLocaleString() + ".";
-          } else {
-              errorMessage += " No update has been recorded yet.";
-          }
-          errorMessage += " Please reload the page manually.";
-          document.getElementById("timer").innerText = errorMessage;
-      });
-  } else {
-      function updateTimer() {
-          let now = Math.floor(Date.now() / 1000);
-          // The countdown includes an extra 60 seconds to provide a buffer before reloading.
-          let diff = (nextUpdate + 60) - now;
-          if (diff <= 0) {
-              window.location.reload();
-              return;
-          }
-          let minutes = Math.floor(diff / 60);
-          let seconds = diff % 60;
-          document.getElementById("timer").innerText = minutes + "m " + seconds + "s";
+    if (diff <= 0) {
+      // If we need to reload, check if we have failed 3 times in a row
+      if (failedUpdateCount < 2) { // Allow 2 consecutive auto-reloads
+        failedUpdateCount++;
+        // Force a hard reload to bypass cache completely
+        window.location.reload();
+      } else {
+        // If we failed 3 times, show an error message
+        document.getElementById("timer").innerText = "Failed to fetch update. Please reload manually.";
       }
-      setInterval(updateTimer, 1000);
-      updateTimer();
+      return;
+    }
+
+    // Reset failedUpdateCount if we have a new nextUpdate value
+    if (nextUpdate !== {{ next_update }}) {
+      failedUpdateCount = 0;
+    }
+
+    const minutes = Math.floor(diff / 60);
+    const seconds = diff % 60;
+    document.getElementById("timer").innerText = minutes + "m " + seconds + "s";
   }
+  
+  // Start the timer
+  setInterval(updateTimer, 1000);
+  updateTimer();
 </script>
 </body>
 </html>
