@@ -214,7 +214,12 @@ def update():
             players[player] = {"rating": INITIAL_PLAYER_RATING, "W": 0, "D": 0, "L": 0, "last_game": "", "tc_bases": [], "tc_incs": []}
         
         # Compute game result.
-        result = 0.5 if g["status"] == "draw" else (1 if g.get("winner") == human_color else 0)
+        if "winner" not in g:
+            result = 0.5
+        elif g["winner"] == human_color:
+            result = 1
+        else:
+            result = 0
         
         # Determine K factor (halved for draws).
         total_games = players[player]["W"] + players[player]["D"] + players[player]["L"]
