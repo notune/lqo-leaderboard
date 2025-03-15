@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LeelaQueenOdds Leaderboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+          background: linear-gradient(135deg, #ece9e6, #ffffff);
+          font-family: 'Roboto', sans-serif;
+          padding: 15px;
+        }
+        .container {
+          position: relative;
+          background-color: rgba(255, 255, 255, 0.9);
+          border-radius: 12px;
+          box-shadow: 0 6px 12px rgba(0,0,0,0.1);
+          padding: 20px;
+          backdrop-filter: blur(8px);
+          max-width: 100%;
+        }
+        h1 {
+          font-weight: 700;
+          color: #333;
+          margin-bottom: 15px;
+          font-size: calc(1.3rem + 1vw);
+        }
+        .countdown {
+          font-size: 1rem;
+          color: #555;
+          margin-bottom: 20px;
+        }
+        .table {
+          margin-bottom: 0;
+          width: 100%;
+        }
+        th {
+          background-color: rgba(0, 123, 255, 0.8);
+          color: #fff;
+          white-space: nowrap;
+        }
+        tbody tr:nth-child(odd) {
+          background-color: rgba(255, 255, 255, 0.7);
+        }
+        tbody tr:nth-child(even) {
+          background-color: rgba(245, 245, 245, 0.7);
+        }
+        /* Enhanced colors for top 3 places */
+        tr.first-place td {
+          background-color: rgba(255, 215, 0, 0.3) !important;
+        }
+        tr.second-place td {
+          background-color: rgba(192, 192, 192, 0.3) !important;
+        }
+        tr.third-place td {
+          background-color: rgba(205, 127, 50, 0.3) !important;
+        }
+        .github-corner svg {
+          position: absolute;
+          top: 0;
+          right: 0;
+          border: 0;
+          z-index: 10;
+        }
+        a.lichess-link {
+          color: blue;
+          text-decoration: none;
+        }
+        a.lichess-link:hover {
+          color: blue;
+          text-decoration: none;
+        }
+        @media (max-width: 768px) {
+          body {
+            padding: 8px;
+          }
+          .container {
+            padding: 12px;
+          }
+          .table {
+            font-size: 0.85rem;
+          }
+          th, td {
+            padding: 0.4rem !important;
+          }
+          td:nth-child(1), th:nth-child(1) { min-width: 30px; } /* Rank */
+          td:nth-child(2), th:nth-child(2) { min-width: 70px; } /* Player name */
+          td:nth-child(3), th:nth-child(3) { min-width: 50px; } /* Rating */
+          td:nth-child(4), th:nth-child(4) { min-width: 40px; } /* Games */
+          td:nth-child(5), th:nth-child(5) { min-width: 80px; } /* Last Game */
+          td:nth-child(6), th:nth-child(6) { min-width: 45px; } /* TC */
+        }
+      </style>
+  </head>
+  <body>
+    <div class="container">
+      <a href="https://github.com/notune/lqo-leaderboard" class="github-corner" aria-label="View source on GitHub" target="_blank">
+            <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 250 250" fill="#151513" style="position: absolute; top: 0; right: 0">
+              <path d="M0 0l115 115h15l12 27 108 108V0z" fill="#fff"/>
+              <path class="octo-arm" d="M128 109c-15-9-9-19-9-19 3-7 2-11 2-11-1-7 3-2 3-2 4 5 2 11 2 11-3 10 5 15 9 16" style="-webkit-transform-origin: 130px 106px; transform-origin: 130px 106px"/>
+              <path class="octo-body" d="M115 115s4 2 5 0l14-14c3-2 6-3 8-3-8-11-15-24 2-41 5-5 10-7 16-7 1-2 3-7 12-11 0 0 5 3 7 16 4 2 8 5 12 9s7 8 9 12c14 3 17 7 17 7-4 8-9 11-11 11 0 6-2 11-7 16-16 16-30 10-41 2 0 3-1 7-5 11l-12 11c-1 1 1 5 1 5z"/>
+            </svg>
+      </a>
+      <h1 class="text-center">LeelaQueenOdds Leaderboard</h1>
+      <div class="text-center mb-3 countdown">
+        Next update in: <span id="timer">Loading...</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table" id="leaderboardTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Player</th>
+              <th>Rating</th>
+              <th>Games</th>
+              <th>Last Game</th>
+              <th>TC</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboardBody">
+            <!-- Dynamic leaderboard rows will be inserted here -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+    
+    <script>
+(function() {
+  const timerElement = document.getElementById("timer");
+  const tbodyElement = document.getElementById("leaderboardBody");
+  let nextUpdateTime = 0;
+  let lastKnownTimestamp = 0;
+  let updateTimeoutId = null;
+
+  async function fetchLeaderboard() {
+    try {
+      const res = await fetch('/leaderboard.json?' + Date.now());
+      if (!res.ok) throw new Error("Network error: " + res.status);
+      const data = await res.json();
+
+      const metadata = data.metadata || {};
+      const lastFetch = metadata.last_fetch || Date.now();
+      const updateInterval = metadata.update_interval || 600000; // default 10 min
+
+      if (lastFetch === lastKnownTimestamp) {
+        // JSON hasn't updated, indicate failure and stop further fetching.
+        timerElement.innerText = "Update delayed or failed. Please reload manually.";
+        return;
+      }
+
+      lastKnownTimestamp = lastFetch;
+
+      const players = Object.entries(data)
+        .filter(([key]) => key !== "metadata")
+        .map(([name, p]) => {
+          const games = (p.W || 0) + (p.D || 0) + (p.L || 0);
+          return { name, ...p, games };
+        })
+        .sort((a, b) => b.rating - a.rating)
+        .slice(0, 100);
+
+      updateLeaderboardTable(players);
+
+      // Set next update time (last_fetch + update_interval + 60 sec buffer)
+      nextUpdateTime = Math.floor((lastFetch + updateInterval) / 1000) + 60;
+
+      // Clear any existing scheduled fetch
+      if (updateTimeoutId) clearTimeout(updateTimeoutId);
+
+      // Schedule next fetch exactly when needed
+      scheduleNextFetch();
+
+    } catch (error) {
+      console.error("Failed to fetch leaderboard:", error);
+      timerElement.innerText = "Failed to fetch update. Please reload manually.";
+    }
+  }
+
+  function updateLeaderboardTable(players) {
+    tbodyElement.innerHTML = "";
+    players.forEach((player, index) => {
+      const tr = document.createElement("tr");
+      if (index === 0) tr.classList.add("first-place");
+      else if (index === 1) tr.classList.add("second-place");
+      else if (index === 2) tr.classList.add("third-place");
+
+      tr.innerHTML = `
+        <td>${index + 1}</td>
+        <td><a href="https://lichess.org/@/${player.name}" class="lichess-link" target="_blank">${player.name}</a></td>
+        <td>${Math.round(player.rating)}</td>
+        <td>${player.games}</td>
+        <td>${player.last_game || ''}</td>
+        <td>${player.Average_TC || ''}</td>
+      `;
+      tbodyElement.appendChild(tr);
+    });
+  }
+
+  function countdownTimer() {
+    const now = Math.floor(Date.now() / 1000);
+    const diff = nextUpdateTime - now;
+
+    if (diff <= 0) {
+      timerElement.innerText = "Updating...";
+      return;
+    }
+
+    const minutes = Math.floor(diff / 60);
+    const seconds = diff % 60;
+    timerElement.innerText = `${minutes}m ${seconds < 10 ? '0' : ''}${seconds}s`;
+    
+    // Update countdown every second
+    setTimeout(countdownTimer, 1000);
+  }
+
+  function scheduleNextFetch() {
+    const now = Math.floor(Date.now() / 1000);
+    const delayMs = (nextUpdateTime - now) * 1000;
+
+    // Start countdown timer
+    countdownTimer();
+
+    // Schedule fetch exactly at nextUpdateTime
+    updateTimeoutId = setTimeout(fetchLeaderboard, delayMs);
+  }
+
+  // Initial fetch immediately on page load
+  fetchLeaderboard();
+
+})();
+    </script>
+  </body>
+</html>
