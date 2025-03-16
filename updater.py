@@ -154,12 +154,12 @@ def inactivity_malus(lead):
 def update():
     logging.info("Starting update routine.")
     archive = load_json(ARCHIVE_FILE, {"games": []})
-    leaderboard = load_json(LEADERBOARD_FILE, {"metadata": {"last_fetch": RATING_START_TIMESTAMP}})
+    leaderboard = load_json(LEADERBOARD_FILE, {"metadata": {"last_update_timestamp": RATING_START_TIMESTAMP}})
     
     old_archive_count = len(archive.get("games", []))
     logging.info(f"Old archive game count: {old_archive_count}")
     
-    last_fetch = leaderboard["metadata"].get("last_fetch", RATING_START_TIMESTAMP)
+    last_fetch = leaderboard["metadata"].get("last_game_timestamp", RATING_START_TIMESTAMP)
     new_games = fetch_all_games(last_fetch)
     logging.info(f"Found {len(new_games)} new games since last fetch.")
     
@@ -175,17 +175,17 @@ def update():
     new_archive_count = len(archive.get("games", []))
     logging.info(f"New archive game count: {new_archive_count} (was {old_archive_count})")
 
-    # Use this:
+    # Set metadata timestamps explicitly
+    fetch_time = int(time.time() * 1000)  # actual script execution time in UTC milliseconds
+
     if new_games:
         latest_game_timestamp = max(game["createdAt"] for game in new_games)
-        leaderboard["metadata"]["last_fetch"] = latest_game_timestamp
-        logging.info(f"Metadata last_fetch (new games, using latest game time): {latest_game_timestamp}")
+        leaderboard["metadata"]["last_game_timestamp"] = latest_game_timestamp + 1
     else:
-        lf_utc = int(time.time() * 1000)
-        leaderboard["metadata"]["last_fetch"] = lf_utc
-        logging.info(f"Metadata last_fetch (no new games, using utc): {lf_utc}")
+        leaderboard["metadata"]["last_game_timestamp"] = leaderboard["metadata"].get("last_game_timestamp", fetch_time)
 
-    leaderboard["metadata"]["update_interval"] = 600000  # 10 minutes
+    leaderboard["metadata"]["last_update_timestamp"] = fetch_time
+    leaderboard["metadata"]["update_interval"] = 600000  # 10 minutes in ms
         
     players = {}
     malus_date = RATING_START_TIMESTAMP  # start malus tracking from the rating start time

@@ -142,16 +142,16 @@
       const data = await res.json();
 
       const metadata = data.metadata || {};
-      const lastFetch = metadata.last_fetch || Date.now();
+      const lastUpdateTimestamp = metadata.last_update_timestamp || Date.now();
       const updateInterval = metadata.update_interval || 600000; // default 10 min
 
-      if (lastFetch === lastKnownTimestamp) {
+      if (lastUpdateTimestamp === lastKnownTimestamp) {
         // JSON hasn't updated, indicate failure and stop further fetching.
         timerElement.innerText = "Update delayed or failed. Please reload manually.";
         return;
       }
 
-      lastKnownTimestamp = lastFetch;
+      lastKnownTimestamp = lastUpdateTimestamp;
 
       const players = Object.entries(data)
         .filter(([key]) => key !== "metadata")
@@ -165,7 +165,7 @@
       updateLeaderboardTable(players);
 
       // Set next update time (last_fetch + update_interval + 60 sec buffer)
-      nextUpdateTime = Math.floor((lastFetch + updateInterval) / 1000) + 60;
+      nextUpdateTime = Math.floor((lastUpdateTimestamp + updateInterval) / 1000) + 60;
 
       // Clear any existing scheduled fetch
       if (updateTimeoutId) clearTimeout(updateTimeoutId);
