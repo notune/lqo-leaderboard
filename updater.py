@@ -174,11 +174,19 @@ def update():
     
     new_archive_count = len(archive.get("games", []))
     logging.info(f"New archive game count: {new_archive_count} (was {old_archive_count})")
-    
-    current_ts = int(time.time() * 1000)
-    leaderboard["metadata"]["last_fetch"] = current_ts
+
+    # Use this:
+    if new_games:
+        latest_game_timestamp = max(game["createdAt"] for game in new_games)
+        leaderboard["metadata"]["last_fetch"] = latest_game_timestamp
+        logging.info(f"Metadata last_fetch (new games, using latest game time): {latest_game_timestamp}")
+    else:
+        lf_utc = int(time.time() * 1000)
+        leaderboard["metadata"]["last_fetch"] = lf_utc
+        logging.info(f"Metadata last_fetch (no new games, using utc): {lf_utc}")
+
     leaderboard["metadata"]["update_interval"] = 600000  # 10 minutes
-    
+        
     players = {}
     malus_date = RATING_START_TIMESTAMP  # start malus tracking from the rating start time
 
