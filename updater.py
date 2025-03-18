@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json, requests, time, math, os, tempfile, logging, shutil
 from datetime import datetime
 
@@ -18,15 +19,18 @@ LICHESS_USERNAME = "LeelaQueenOdds"
 LICHESS_TOKEN = os.environ.get("LICHESS_TOKEN")
 ARCHIVE_FILE = "game_archive.json"
 LEADERBOARD_FILE = "/var/www/lqo_leaderboard/static/leaderboard.json"
-
+# Use a fixed rating start date
 RATING_START_TIMESTAMP = int(datetime(2025, 2, 24).timestamp() * 1000)
 BOT_BASE_RATING = 2650
 BLACK_PENALTY = 200            # Penalize black by 200 Elo (instead of 100)
 INITIAL_PLAYER_RATING = 1800
-MALUS_INTERVAL = 30 * 86400 * 1000  # 7 days in milliseconds
+MALUS_INTERVAL = 30 * 86400 * 1000  # adjust as needed (here written as 30 days in ms)
 CHUNK_SIZE = 1800000           # 30 minutes in ms (for API chunking)
+# New constant: “recent” games are those finished within the last 3 hours.
+REFETCH_DELAY = 3 * 60 * 60 * 1000  # 3 hours in ms
 
 # ────── Helper Functions ──────
+
 def fetch_games_chunk(since, until=None):
     headers = {"Authorization": f"Bearer {LICHESS_TOKEN}", "Accept": "application/x-ndjson"}
     params = {"since": since, "max": 300, "pgnInJson": "true", "clocks": False, "moves": False}
@@ -59,28 +63,32 @@ def fetch_games_chunk(since, until=None):
         logging.error(f"Error processing response: {e}.")
     return games
 
-def fetch_all_games(since):
-    logging.info(f"Starting fetch_all_games() from {datetime.utcfromtimestamp(since/1000)}")
+def fetch_all_games_range(lower_bound, upper_bound):
+    """
+    Fetches all games between lower_bound and upper_bound (both in ms).
+    This loop handles chunking using CHUNK_SIZE.
+    """
+    logging.info(f"Fetching games from {datetime.utcfromtimestamp(lower_bound/1000)} to {datetime.utcfromtimestamp(upper_bound/1000)}")
     all_games = []
-    current_time = int(time.time() * 1000)
-    pointer = since
-    while pointer < current_time:
-        until = pointer + CHUNK_SIZE
-        if until > current_time:
-            until = current_time
-        logging.info(f"Fetching games from {datetime.utcfromtimestamp(pointer/1000)} to {datetime.utcfromtimestamp(until/1000)}")
-        chunk_games = fetch_games_chunk(pointer, until)
+    pointer = lower_bound
+    while pointer < upper_bound:
+        next_until = pointer + CHUNK_SIZE
+        if next_until > upper_bound:
+            next_until = upper_bound
+        logging.info(f"Fetching chunk from {datetime.utcfromtimestamp(pointer/1000)} to {datetime.utcfromtimestamp(next_until/1000)}")
+        chunk_games = fetch_games_chunk(pointer, next_until)
         if chunk_games:
             logging.info(f"Retrieved {len(chunk_games)} games in this chunk.")
             all_games.extend(chunk_games)
+            # If max limit (300) returned, there might be more games at the same timestamp.
             if len(chunk_games) == 300:
                 last_created = chunk_games[-1]["createdAt"]
-                pointer = last_created + 1 if last_created > pointer else until
+                pointer = last_created if last_created > pointer else next_until
                 time.sleep(1)
                 continue
-        pointer = until
+        pointer = next_until
         time.sleep(1)
-    logging.info(f"Fetched a total of {len(all_games)} games.")
+    logging.info(f"Fetched a total of {len(all_games)} games between the given bounds.")
     return all_games
 
 def load_json(path, default):
@@ -104,11 +112,8 @@ def atomic_save_json(path, data, owner='ubuntu', group='www-data', mode=0o664):
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp.name, path)
-        
-        # Explicitly set permissions and ownership
         shutil.chown(path, user=owner, group=group)
         os.chmod(path, mode)
-        
         logging.info(f"Successfully saved JSON to {path}.")
     except Exception as e:
         logging.error(f"Error saving JSON to {path}: {e}")
@@ -117,20 +122,19 @@ def escore(elo):
     return 1 / (1 + 10 ** (elo / 400))
 
 def model1(timecontrol):
-    """Computes an adjustment based on the given time control string ('<seconds>+<increment>')."""
+    """Compute adjustment based on the time control string ('<seconds>+<increment>')."""
     try:
         t, inc = timecontrol.split('+')
         t = int(t)
         inc = int(inc)
         b1 = 158
         b2 = 251
-        normalized_32 = math.log(180 + math.log(1 + 2)*b1) * b2
-        return math.log(t + math.log(1 + inc)*b1) * b2 - normalized_32
+        normalized_32 = math.log(180 + math.log(1 + 2) * b1) * b2
+        return math.log(t + math.log(1 + inc) * b1) * b2 - normalized_32
     except Exception as e:
         logging.error(f"Error in model1 with timecontrol '{timecontrol}': {e}")
         return 0
 
-# Use model1 as our adjustment function.
 adjust_func = model1
 
 def k_thresh(games):
@@ -151,51 +155,68 @@ def inactivity_malus(lead):
     return lead
 
 # ────── Main Update Routine ──────
+
 def update():
     logging.info("Starting update routine.")
     archive = load_json(ARCHIVE_FILE, {"games": []})
-    leaderboard = load_json(LEADERBOARD_FILE, {"metadata": {"last_update_timestamp": RATING_START_TIMESTAMP}})
+    # The leaderboard JSON key names remain unchanged so that the HTML stays the same.
+    leaderboard = load_json(LEADERBOARD_FILE, {"metadata": {"last_update_timestamp": RATING_START_TIMESTAMP,
+                                                              "last_game_timestamp": RATING_START_TIMESTAMP}})
     
     old_archive_count = len(archive.get("games", []))
     logging.info(f"Old archive game count: {old_archive_count}")
     
+    # Use the stored last_game_timestamp as our starting point.
     last_fetch = leaderboard["metadata"].get("last_game_timestamp", RATING_START_TIMESTAMP)
-    new_games = fetch_all_games(last_fetch)
-    logging.info(f"Found {len(new_games)} new games since last fetch.")
+    current_time = int(time.time() * 1000)
+    # Define cutoff: any game older than this (current_time - REFETCH_DELAY) is considered stable.
+    safe_cutoff = current_time - REFETCH_DELAY
+
+    # Fetch two ranges:
+    # 1. Stable range: games between last_fetch and safe_cutoff.
+    new_games_stable = fetch_all_games_range(last_fetch, safe_cutoff)
+    # 2. Recent range: games between safe_cutoff and now (this range is repeatedly re-fetched until the games become stable).
+    new_games_recent = fetch_all_games_range(safe_cutoff, current_time)
     
+    # Combine both sets.
+    new_games = new_games_stable + new_games_recent
+    logging.info(f"Found {len(new_games)} new games since last fetch (stable: {len(new_games_stable)}, recent: {len(new_games_recent)}).")
+    
+    # Deduplicate and add new games to the archive.
     existing_ids = set(g["id"] for g in archive.get("games", []))
     new_added = 0
+    # Only update the pointer with stable games (ensuring the game is definitely finished).
+    latest_stable_timestamp = last_fetch
+
     for g in new_games:
         if g["id"] not in existing_ids:
             archive["games"].append(g)
             new_added += 1
+        # Only use stable games (those with createdAt <= safe_cutoff) for moving the pointer forward.
+        if g["createdAt"] <= safe_cutoff and g["createdAt"] > latest_stable_timestamp:
+            latest_stable_timestamp = g["createdAt"]
+
     logging.info(f"Added {new_added} new games to the archive.")
     atomic_save_json(ARCHIVE_FILE, archive)
     
     new_archive_count = len(archive.get("games", []))
     logging.info(f"New archive game count: {new_archive_count} (was {old_archive_count})")
-
-    # Set metadata timestamps explicitly
-    fetch_time = int(time.time() * 1000)  # actual script execution time in UTC milliseconds
-
-    if new_games:
-        latest_game_timestamp = max(game["createdAt"] for game in new_games)
-        leaderboard["metadata"]["last_game_timestamp"] = latest_game_timestamp + 1
-    else:
-        leaderboard["metadata"]["last_game_timestamp"] = leaderboard["metadata"].get("last_game_timestamp", fetch_time)
-
+    
+    # Update metadata:
+    fetch_time = int(time.time() * 1000)
+    # Advance pointer only to the stable cutoff
+    leaderboard["metadata"]["last_game_timestamp"] = latest_stable_timestamp
     leaderboard["metadata"]["last_update_timestamp"] = fetch_time
     leaderboard["metadata"]["update_interval"] = 600000  # 10 minutes in ms
-        
+    
+    # Now update the leaderboard calculations.
     players = {}
-    malus_date = RATING_START_TIMESTAMP  # start malus tracking from the rating start time
-
-    # Process games in chronological order.
+    malus_date = RATING_START_TIMESTAMP  # Start malus tracking from the rating start time.
+    # Process games in the archive in chronological order.
     for g in sorted(archive.get("games", []), key=lambda x: x["createdAt"]):
         if g["createdAt"] < RATING_START_TIMESTAMP:
             continue
-
-        # Apply inactivity malus if at least 7 days have elapsed.
+        # Every MALUS_INTERVAL, apply an inactivity malus.
         if g["createdAt"] - malus_date >= MALUS_INTERVAL:
             players = inactivity_malus(players)
             malus_date = g["createdAt"]
@@ -206,7 +227,7 @@ def update():
         inc = tc.get("increment", 2)
         tc_str = f"{base}+{inc}"
         
-        # Determine which color the BOT (LeelaQueenOdds) played.
+        # Determine which color BOT (LeelaQueenOdds) played.
         bot_color = "white" if g["players"]["white"]["user"]["name"].lower() == LICHESS_USERNAME.lower() else "black"
         human_color = "black" if bot_color == "white" else "white"
         player = g["players"][human_color]["user"]["name"]
@@ -217,11 +238,11 @@ def update():
             effective_bot_rating -= BLACK_PENALTY
         effective_bot_rating -= adjust_func(tc_str)
         
-        # Initialize player record if missing.
+        # Initialize player's record if missing.
         if player not in players:
             players[player] = {"rating": INITIAL_PLAYER_RATING, "W": 0, "D": 0, "L": 0, "last_game": "", "tc_bases": [], "tc_incs": []}
         
-        # Compute game result.
+        # Compute result.
         if "winner" not in g:
             result = 0.5
         elif g["winner"] == human_color:
@@ -251,7 +272,7 @@ def update():
         players[player]["tc_bases"].append(base)
         players[player]["tc_incs"].append(inc)
     
-    # Compute average time control (in "minutes+seconds" format without extra symbols).
+    # Compute average time control for each player.
     for p in players:
         if players[p]["tc_bases"]:
             avg_base = round(sum(players[p]["tc_bases"]) / len(players[p]["tc_bases"]))
